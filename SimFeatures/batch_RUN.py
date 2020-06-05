@@ -1,0 +1,1270 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Nov 13 14:23:29 2019
+
+@author: vr887
+"""
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import kurtosis, skew, spearmanr
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+from statsmodels.stats.multicomp import MultiComparison
+
+from scipy import signal
+from scipy import stats
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import pandas as pd
+from joblib import Parallel, delayed
+import time
+from myfuncs import fun_extractERPfeats,fun_extractERPfeatsUni,fun_extractERPfeatsMultivar
+
+from scipy.ndimage.filters import uniform_filter1d
+from scipy.ndimage import median_filter
+from sklearn.feature_selection import mutual_info_regression
+
+
+class CA1simulation():
+    def __init__(self,Pops,Fs = 512, finalTime=100.,stimPeriod = 0.5,stimDuration = 0.01,stimAmp = 4,stimPos = "DG",biphasic = 0 ):
+        #Initialtisation of the Vector of parameters
+        self.finalTime = finalTime #simulation time, in seconds
+        #Simulation parameters
+        self.Fs = Fs #user-defined (typical: 512 Hz)
+        self.stimDuration = 0.01 #stimulus duration (seconds)
+        self.stimPeriod = 2 # stimulus Period  (in s)
+        self.stimAmp = stimAmp #stimulus amplitude 
+        self.Pops = Pops
+        self.nbSamples = int(self.finalTime*Fs) # number of samples
+        
+        #For changes in parameters across the simulation - edit these fields after defining the class
+        self.As = np.array([Pops.P[fi]["A"]*np.ones(self.nbSamples) for fi in range(len(Pops.P))])
+        self.Bs = np.array([Pops.P[fi]["B"]*np.ones(self.nbSamples) for fi in range(len(Pops.P))])
+        self.Gs = np.array([Pops.P[fi]["G"]*np.ones(self.nbSamples) for fi in range(len(Pops.P))])
+        self.Ks = np.array([Pops.P[fi]["K"]*np.ones(self.nbSamples) for fi in range(len(Pops.P))])
+
+        #Input stimulus
+        stimIndxs = [np.arange(int(Fs*stimPeriod)+i,self.nbSamples-i,int(Fs*stimPeriod)) for i in range(int(Fs*stimDuration))]
+        stimIndxsNegative = [np.arange(int(Fs*stimPeriod)+int(stimDuration*Fs)+i,self.nbSamples-i,int(Fs*stimPeriod)) for i in range(int(Fs*stimDuration))]
+        #[one for each model set] [time samples, 0 for intra-hip stim/ 1 for DG stim]
+        uinput = [np.zeros([2,self.nbSamples]) for ui in range(Pops.Nsets)]
+        
+        if stimPos == "DG":#stimulates model input
+            uIdx = 1
+        else: #stimulates all cells
+            uIdx = 0
+        for ui in range(Pops.Nsets):
+            uinput[ui][uIdx,stimIndxs] = stimAmp
+            if biphasic:
+                uinput[ui][uIdx,stimIndxsNegative] = -stimAmp#biphasic pulse
+        self.stimInput = uinput
+           
+    def simulateLFP(self,highpass = 1):
+        nb_fonc = 10 # Number of ODEs
+        dt = 1./self.Fs # step size
+        Nmodels = self.Pops.Nsets#number of (coupled) model sets
+       
+        kTemp = np.zeros([Nmodels, max(1,int(0.001*self.Pops.P[0]["cLag"]*self.Fs))]) #pyr state output (for lagged inter coupling)
+        
+        #new simulation - initialize variables
+        LFPout = np.zeros([Nmodels,self.nbSamples])
+        tvec = np.zeros(self.nbSamples)#time vector
+        t = 0.
+        yold = np.zeros([Nmodels,nb_fonc])               
+        
+        for tt in range(self.nbSamples):
+            for ch in range(Nmodels):#for each set
+                #resets coupling values
+                couplInputIntra = 0.
+                couplInputInter = 0.
+                
+                self.Pops.P[ch]["A"] = self.As[ch,tt]
+                self.Pops.P[ch]["B"] = self.Bs[ch,tt]
+                self.Pops.P[ch]["G"] = self.Gs[ch,tt]
+                self.Pops.P[ch]["K"] = self.Ks[ch,tt]
+    
+                if self.Pops.coupling == "inter": #inter-hemisphere coupling - bidirectional, between pyramidal (EXC) cells
+                    if (ch-1 >=0):
+                        couplInputInter = couplInputInter + self.Pops.P[ch]["K"]*kTemp[(ch-1),-1]#lagged input from another pop set
+                    if (ch+1 < Nmodels): #coupling is bidirectional
+                        couplInputInter =  couplInputInter + self.Pops.P[ch]["K"]*kTemp[(ch+1),-1]                  
+                elif self.Pops.coupling == "intra":#intra-hemisphere coupling - bidirectional, between basket (SDI) cells
+                    if (ch-1 >=0):
+                        couplInputIntra =  couplInputIntra + self.Pops.P[ch]["K"]*yold[(ch-1),3]  
+                    if (ch+1 < Nmodels):#bidirectional coupling
+                        couplInputIntra =  couplInputIntra + self.Pops.P[ch]["K"]*yold[(ch+1),3]
+    
+                ynew = wendlingModel_2(yold[ch,:],self.Pops.P[ch],dt, self.stimInput[ch][:,tt], couplInputIntra, couplInputInter )
+                yold[ch,:] = ynew
+                LFPout[ch,tt] = ynew[1]-ynew[2]-ynew[3]#model output
+                kTemp[ch,0] = ynew[1]
+            kTemp = np.roll(kTemp, 1, axis = 1)#shifts y[1]
+            tvec[tt] = t
+            t += dt 
+            
+        #detrend    
+        LFPout = signal.detrend(LFPout)
+          
+        if highpass == 1:
+            b, a = signal.butter(3, 0.2*2/self.Fs, 'high')   #highpass 
+            for chi in range(Nmodels):
+                print(chi)
+                LFPout[chi,:] = signal.filtfilt(b, a, LFPout[chi,:])
+        return LFPout
+    
+class CA1popSet():
+    """Wendling CA1 Population sets
+    *Nsets defines the number of populations
+    *coupling defines how these are interconected 
+        "inter" for inter-hemisphere coupling, through main exc cells
+        "intra" for intra-hippocampal coupling through basket cells
+    """
+    
+    from itertools import combinations
+
+    def __init__(self,Nsets = 2,coupling = "inter",A = 4., B = 40.,G = 20.,K = 0,pSTD = 1.3, pMean = 90., clag = 10):
+        P = {"A":A,"B":B,"G":G,"K":K,"a":100.,"b":50.,"g":350.,"v0":6.,"e0":2.5,"r":0.56,"sigmaP":pSTD,"meanP":pMean,
+                          "C1":1.,"C2":0.8,"C3":0.25,"C4":0.25,"C5":0.1,"C6":0.1,"C7":0.8,"C":135.,"cLag":clag}
+        P["C1"] *= P["C"]; P["C2"] *= P["C"]; P["C3"] *= P["C"]; P["C4"] *= P["C"]
+        P["C5"] *= P["C"]; P["C6"] *= P["C"]; P["C7"] *= P["C"];    
+        self.P = [None]*Nsets
+        for pi in range(Nsets):
+
+            self.P[pi] = P
+            self.coupling = coupling    
+            self.Nsets = Nsets
+
+def wendlingModel_2(y, P, h = 1./512, u = np.zeros(1), couplIntra = 0, couplInter = 0 ):
+    #y: last state
+    #P: model parameters
+    #h: step (1/Fs)
+    #u: stimulation input - 2 elements u[0] voltage deflection to all cells. u[1] sums the stimulus to the model input p(t)
+    #couplIntra: coupling between basket cells (intra-hipp coupling)
+    #couplInter: coupling between pyramidal cells (intra-hemisphere coupling)
+    #euler-maruyama 
+    noise = np.random.normal(0, P["sigmaP"])# np.sqrt(dt) para compensar diferentes steps de integração
+    yNew = np.zeros(10)
+    yNew[0] = y[0] + y[5] * h
+    yNew[5] = y[5] + (P["A"] * P["a"] * sigm(P["K"]*couplInter+u[0]+y[1]-y[2]-y[3],P) - 2. * P["a"] * y[5] - P["a"]*P["a"] * y[0]) * h
+    yNew[1] = y[1] + y[6] * h
+    yNew[6] = y[6] + (np.sqrt(h)*noise*P["A"]*P["a"]) + (P["A"] * P["a"] * (u[1]+P["meanP"] + P["C2"] * sigm(P["C1"]* y[0] + u[0],P)) - 2. * P["a"] * y[6] - P["a"]*P["a"] * y[1]) * h
+    yNew[2] = y[2] + y[7] * h
+    yNew[7] = y[7] + (P["B"] * P["b"] * (P["C4"] * sigm(P["C3"] * y[0] + u[0],P) ) - 2. * P["b"] * y[7] - P["b"]*P["b"] * y[2]) * h
+    yNew[3] = y[3] + y[8] * h
+    yNew[8] = y[8] + (P["G"] * P["g"] * (P["C7"] * sigm((u[0] + P["C5"] * y[0] - P["C6"] * y[4] - P["K"]*couplIntra),P) ) - 2. * P["g"] * y[8] - P["g"]*P["g"] * y[3]) * h
+    yNew[4] = y[4] + y[9] * h
+    yNew[9] = y[9] + (P["B"] * P["b"]* ( sigm(P["C3"] * y[0] + u[0],P) ) - 2 * P["b"] * y[9] - P["b"]*P["b"] * y[4]) * h
+    
+    return yNew
+    
+def sigm(v,P):
+    return 2.*P["e0"]/(1.+np.exp(P["r"]*(P["v0"]-v))) 
+
+
+def SimFeats(simLFP,Nmodels,promedia,stimTS,Fs,simLFPmean = 0):
+    #(Feats, FeatsMulti) = SimFeats(simLFP,simLFPmean,Nmodels,promedia,stimTS,Fs)
+    #Extracts features from each simulation
+    #design filters
+    bLP, aLP = signal.butter(3, 20*2/Fs)        #lowpass   
+    simulatedLFPFilt = np.zeros(simLFP.shape)
+    #std of initial segment - used as a reference for identifying ictal periods
+    baselineSTDs = np.std(simLFP[:,:int(50*Fs)], axis = 1) 
+    #from each simulation, extracts feature sets
+    #feature initializing
+    if Nmodels >1:   #only for simulations with coupled models - coupling measures
+        NSynch = Nmodels*(Nmodels-1)//2
+        FeatsMulti = {"PLV":np.ndarray(shape = [len(stimTS),NSynch]),
+                      "Corr":np.ndarray(shape = [len(stimTS),NSynch]),
+                      "PLVphase":np.ndarray(shape = [len(stimTS),NSynch]),
+                      "Coh":np.ndarray(shape = [len(stimTS),NSynch]),
+                      "MI":np.ndarray(shape = [len(stimTS),NSynch])}  
+        diInit = range(Nmodels+1)
+
+    else:
+        diInit = range(Nmodels)
+        FeatsMulti = 0
+    Feats = [{"normEnergy":np.zeros([len(stimTS)]),"Var":np.zeros([len(stimTS)]),
+             "Skew":np.zeros([len(stimTS)]),"Kurt":np.zeros([len(stimTS)]),
+             "Hmob":np.zeros([len(stimTS)]),"Hcomp":np.zeros([len(stimTS)]),
+             "PkAmp":np.zeros([len(stimTS)]),"Energy":np.zeros([len(stimTS)]),
+             "ValeAmp":np.zeros([len(stimTS)]),"PkLag":np.zeros([len(stimTS)]),
+             "ValeLag":np.zeros([len(stimTS)]),"lag1AC":np.zeros([len(stimTS)]),
+             "Ictal":np.zeros([len(stimTS)]),"IctalOnset":0} for di in diInit]
+    #stores all Evoked response potentials - allPEARPS and allPEARPS_2
+    allPEARPS = np.ndarray(shape=(len(stimTS),int((tprePEARP)*Fs)+int((tposPEARP)*Fs),Nmodels))#(Stims,timesamples,channel)
+    if promedia == "erps":
+        allPEARPS_2 = np.zeros([len(stimTS),int((tprePEARP)*Fs)+int((tposPEARP)*Fs)])#  for mean LFP (only for Nmodels >2 and promedia == "erps")
+        allPEARPS_2_filt = np.ndarray(shape=(len(stimTS),int((tprePEARP)*Fs)+int((tposPEARP)*Fs),Nmodels))#(Stims,timesamples,channel) same, but lowpass filtered 
+    tpearp = np.linspace(0,allPEARPS.shape[1]/Fs,allPEARPS.shape[1])
+
+    #lowpass filtering
+
+
+    for chi in range(Nmodels):
+        simulatedLFPFilt[chi,:] = signal.filtfilt(bLP, aLP, simLFP[chi,:])
+        #seizure onset time - find when discharges begin to repeat with intervals <1.5s
+        #TODO how to deal with higher stim. frequencies?
+        indsRemove = []#remove peaks near stimuli indexes
+        indsRemove = np.append(indsRemove, [np.arange(stemp,stemp+int(0.03*Fs)) for stemp in stimTS])#exclude peaks due to stimulation?
+        pk = signal.find_peaks(simLFP[chi,:],height=5)
+        pk = pk[0]
+        pk = np.delete(pk,np.where(np.isin(pk,indsRemove))[0])
+        if pk.size > 10:  
+            pkDif = np.diff(pk)
+            #pkDifMed = signal.medfilt(pkDif, kernel_size=5)
+            pkDifMed = median_filter(pkDif,size = 11)
+            icOnset = np.where(pkDifMed<=1.5*Fs)[0] 
+            if icOnset.size>0:
+                Feats[chi]["IctalOnset"] = pk[icOnset[0]]
+            else:
+                Feats[chi]["IctalOnset"]= np.NaN
+        else:
+            Feats[chi]["IctalOnset"]= np.NaN
+            
+    #ERP features
+    for si in range(len(stimTS)):
+        indsERP = np.arange(stimTS[si],stimTS[si]+int(tposPEARP*Fs))#ERP indexes (only for "feature" averaging)
+        indsERP2 = range(max(0,si-avrgWinSize+1),si+1) #indexes - which ERPs to average (relative to allPEARPS) - mean ERP of last "avrgWinSize" stimuli
+        ERP = np.zeros([len(indsERP),Nmodels])
+        for chi in range(Nmodels):#for each channel/model
+            
+            allPEARPS[si,:,chi] = simLFP[chi,stimTS[si]-int(tprePEARP*Fs):stimTS[si]+int(tposPEARP*Fs)]
+            if promedia == "features": #smooths through "features"
+                ERP[:,chi] = simLFP[chi,indsERP]
+                preerp = simLFP[chi,stimTS[si]-int(tprePEARP*Fs):stimTS[si]]
+            else: #ERP smoothing
+                ERP[:,chi] = np.mean(allPEARPS[indsERP2,int(tprePEARP*Fs):,chi],axis = 0)
+                preerp = np.mean(allPEARPS[indsERP2,0:int(tprePEARP*Fs)-1,chi],axis = 0)
+                allPEARPS_2_filt[si,:,chi] = simulatedLFPFilt[chi,stimTS[si]-int(tprePEARP*Fs):stimTS[si]+int(tposPEARP*Fs)]
+            #FEATURE EXTRACTION
+            #Normalized energy: postStim/preStim
+            featsTempUNI = fun_extractERPfeatsUni(ERP[:,chi],preerp,Fs)
+            #organize feature variable
+            for fKey in featsTempUNI.keys():
+                Feats[chi][fKey][si] = featsTempUNI[fKey]  
+            #seizure detection
+            Feats[chi]["Ictal"][si] = ERP[abs(ERP)>=3*baselineSTDs[chi]].size/ERP.size
+        if Nmodels >1:
+            #UNIVARIATE features from mean(LFP) (LAST element from Feats!)
+            if promedia == "features": #smooths through "features"
+                ERPmean = simLFPmean[indsERP]
+                preMeanerp = simLFPmean[stimTS[si]-int(tprePEARP*Fs):stimTS[si]]
+                ERPsFilt = simulatedLFPFilt[:,indsERP] #with filtered signal
+            else: #ERP smoothing
+                allPEARPS_2[si,:] = simLFPmean[stimTS[si]-int(tprePEARP*Fs):stimTS[si]+int(tposPEARP*Fs)]
+                ERPmean = np.mean(allPEARPS_2[indsERP2,int(tprePEARP*Fs):],axis = 0)
+                preMeanerp = np.mean(allPEARPS_2[indsERP2,0:int(tprePEARP*Fs)-1],axis = 0)
+                ERPsFilt = np.mean(allPEARPS_2_filt[indsERP2,int(tprePEARP*Fs):,:],axis = 0)
+
+            featsTempUNI2 = fun_extractERPfeatsUni(ERPmean,preMeanerp,Fs)
+            for fKey in featsTempUNI2.keys():#mean LFP features
+                Feats[-1][fKey][si] = featsTempUNI2[fKey]
+
+            #COUPLING FEATURES
+            featsTempMULTI = fun_extractERPfeatsMultivar(ERP.T,ERPsFilt,Fs)  
+            FeatsMulti["PLV"][si,:] = featsTempMULTI["PLV"]
+            FeatsMulti["Corr"][si,:] = [featsTempMULTI["CorrCoefs"][ix] for ix in  featsTempMULTI["combinations"] ]
+            FeatsMulti["PLVphase"][si,:] = featsTempMULTI["PLVphase"]
+            FeatsMulti["Coh"][si,:] = featsTempMULTI["Coh"]
+            FeatsMulti["MI"][si,:] = featsTempMULTI["MI"]
+    if Nmodels >1:
+        FeatsMulti["SynchPairs"] = featsTempMULTI["combinations"]     
+    return (Feats, FeatsMulti)
+    
+def multiCompare(dfMeasure, selectedFeats):
+    #Multiple comparisons between correlation measures - all stimuli amplitudes vs one(no stimulation)
+    #dfMeasure: Dataframe with correlation measures
+    #selectedFeats: Selected features to compare
+    ps_, h_rej = [None]*2, [None]*2
+    
+    for chi in np.unique(dfMeasure["channel"]):
+        ps_[chi],h_rej[chi] = {},{}
+        
+        for sbNum,fkey in enumerate(plotFeatLabels):
+            mc = MultiComparison(dfMeasure.loc[dfMeasure["channel"]==chi,fkey],
+                                   dfMeasure.loc[dfMeasure["channel"]==chi,"StimAmp"]
+                                  )
+            mc_results = mc.tukeyhsd()  
+            ps_[chi][fkey] = mc_results.pvalues[:sAmps.size-1]
+            h_rej[chi][fkey] = mc_results.reject[:sAmps.size-1]
+        
+        ps_[chi] = pd.DataFrame.from_dict(ps_[chi], orient='index',columns=sAmps[1:])
+        h_rej[chi] = pd.DataFrame.from_dict(h_rej[chi], orient='index',columns=sAmps[1:])
+    return ps_,h_rej
+    
+def plotUniFigs(pFeats,plotFeatures,zscore = 0,sb_row = 3, sb_col = 3, plotColor = [0,0,0]):
+    #plot univariate feature series, with mean+confidence intervals across realizations
+    for sbNum,fkey in enumerate(plotFeatures):
+        plt.subplot(sb_row,sb_col,sbNum+1)
+        y = uniform_filter1d(pFeats[fkey], size=avrgWinSize,axis = 0)
+        if zscore == 1:
+            y = (y - np.mean(y,axis=0))/np.std(y,axis = 0)
+        #y = pFeats[fkey]
+        fSEM = np.std(y,axis = 1) #use SEM or STD?
+        y = np.mean(y,axis = 1)
+        plt.plot(stimTS/PopsModel[si].Fs,y,c = plotColor)  
+        plt.fill_between(stimTS/PopsModel[si].Fs, y-fSEM, y+fSEM,alpha = 0.4, color = plotColor, linewidth = 0)
+        #plt.plot(Feats[-1][fkey][:,0])  
+        plt.title(fkey)
+        #fancy plot stuff
+        plt.autoscale(tight=True)
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)  
+        plt.gca().spines['bottom'].set_visible(False)  
+        plt.gca().get_xaxis().set_ticks([])
+        plt.gca().locator_params(axis='y', nbins=3)
+
+def CorrMeasures(xplot,Feats,plotFeatures,plotFeaturesSynch,chSet = 0,Nmodels = 1, FeatsMulti = 0):
+    #correlation measures between features (Feats and FeatsMulti) and changed parameter (xplot)
+    MeasMI = [None]*len(stimAmp) #mutual information [StimAmps][Realizations,features]
+    MeasCorr = [None]*len(stimAmp) 
+    MeasSpCorr = [None]*len(stimAmp) 
+    
+    for ui in range(len(stimAmp)): #for each stimulus type 
+        MeasMI[ui],MeasSpCorr[ui],MeasCorr[ui] = {},{},{}
+        for fkey in plotFeatures:# CHECK! Feats[0:2]
+            ysmooth = uniform_filter1d(Feats[ui][chSet][fkey], size=avrgWinSize,axis = 0)
+            MeasMI[ui][fkey] =        mutual_info_regression(ysmooth, xplot[stimTS]) 
+            MeasCorr[ui][fkey] =      np.corrcoef(ysmooth.T,xplot[stimTS])[-1,:-1]
+            spTemp = spearmanr(ysmooth,xplot[stimTS])[0]
+            if Nsims>1:
+                spTemp = spTemp[-1,:-1]
+            MeasSpCorr[ui][fkey] =  spTemp
+        if Nmodels>1:
+            for fkey in plotFeaturesSynch:
+                ysmooth = uniform_filter1d(FeatsMulti[ui][fkey][:,:,0], size=avrgWinSize,axis = 0)
+                MeasMI[ui][fkey] =     mutual_info_regression(ysmooth, xplot[stimTS-1])
+                MeasCorr[ui][fkey] =   np.corrcoef(ysmooth.T,xplot[stimTS])[-1,:-1]
+                spTemp = spearmanr(ysmooth,xplot[stimTS])[0]
+                if Nsims>1:
+                    spTemp = spTemp[-1,:-1]
+                MeasSpCorr[ui][fkey] =  spTemp                
+                
+        MeasMI[ui]["StimAmp"] = stimAmp[ui]*np.ones(Nsims)
+        MeasCorr[ui]["StimAmp"] = stimAmp[ui]*np.ones(Nsims)
+        MeasSpCorr[ui]["StimAmp"] = stimAmp[ui]*np.ones(Nsims)
+        
+        MeasMI[ui]["channel"] = chSet
+        MeasCorr[ui]["channel"] = chSet
+        MeasSpCorr[ui]["channel"] = chSet
+        
+        #seizure onset time 
+        MeasMI[ui] = pd.DataFrame(MeasMI[ui])
+        MeasCorr[ui] = pd.DataFrame(MeasCorr[ui])
+        MeasSpCorr[ui] = pd.DataFrame(MeasSpCorr[ui])
+    
+    MeasMI_df = pd.concat([ii for ii in MeasMI], ignore_index=True)
+    MeasSpCorr_df = pd.concat([ii for ii in MeasSpCorr], ignore_index=True)  
+    MeasCorr_df = pd.concat([ii for ii in MeasCorr], ignore_index=True) 
+    
+    return MeasMI_df, MeasSpCorr_df, MeasCorr_df
+#%% I-A
+
+stimAmp = np.linspace(0,200,11) #stimulus amplitude
+#stimAmp = [0]
+Nmodels = 1
+
+#Feature parameters
+tprePEARP = 0.4 #time pre-stimulus
+tposPEARP = 0.4 #time post-stimulus for feature extraction
+#promedia = "erps" #smoothing through "features" or "erps" ?
+promedia = "features" #smoothing through "features" or "erps" ?
+avrgWinSize = 20 #moving average window size
+
+Nsims = 15 #number of realizations/simulations
+xvar = 'A' #which parameter is varied (for plotting)
+Fs = 512.
+"""
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    #PopsModel[si].Bs[0,:] = np.linspace(45., 28., PopsModel[si].nbSamples)
+    #PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    #PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+    #plt.figure()
+    #plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)                      
+                    
+MeasMI_df.to_pickle('I-A_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('I-A_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('I-A_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("I-A_Feats",Feats)
+np.save("I-A_FeatsMulti",FeatsMulti)
+
+#%% I-B
+
+Nmodels = 1
+xvar = 'B' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    #PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    PopsModel[si].Bs[0,:] = np.linspace(45., 30., PopsModel[si].nbSamples)
+    #PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    #PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+    #plt.figure()
+    #plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)                      
+                    
+MeasMI_df.to_pickle('I-B_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('I-B_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('I-B_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("I-B_Feats",Feats)
+np.save("I-B_FeatsMulti",FeatsMulti)
+
+#%% II - A
+Nmodels = 2
+xvar = 'A' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    #PopsModel[si].Bs[0,:] = np.linspace(45., 28., PopsModel[si].nbSamples)
+    #PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+    #plt.figure()
+    #plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)                      
+                    
+MeasMI_df.to_pickle('II-A_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('II-A_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('II-A_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("II-A_Feats",Feats)
+np.save("II-A_FeatsMulti",FeatsMulti)
+
+#%% II - B
+Nmodels = 2
+xvar = 'B' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    #PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    PopsModel[si].Bs[0,:] = np.linspace(45., 30., PopsModel[si].nbSamples)
+    #PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=9,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+    plt.figure()
+    plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=9,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)                      
+                    
+MeasMI_df.to_pickle('II-B_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('II-B_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('II-B_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("II-B_Feats",Feats)
+np.save("II-B_FeatsMulti",FeatsMulti)
+
+#%% II - K
+
+Nmodels = 2
+xvar = 'K' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    #PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    #PopsModel[si].Bs[0,:] = np.linspace(45., 28., PopsModel[si].nbSamples)
+    PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+#    plt.figure()
+#    plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)                      
+
+plt.figure()
+plt.plot(tvec,simulatedLFP[0,:,:].T)
+                    
+MeasMI_df.to_pickle('II-K_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('II-K_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('II-K_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("II-K_Feats",Feats)
+np.save("II-K_FeatsMulti",FeatsMulti)
+"""
+# %% III - A
+Nmodels = 2
+xvar = 'A' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    #PopsModel[si].Bs[0,:] = np.linspace(45., 28., PopsModel[si].nbSamples)
+    #PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    #PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+#    plt.figure()
+#    plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)          
+            
+plt.figure()
+plt.plot(tvec,simulatedLFP[0,:,:].T)
+                    
+MeasMI_df.to_pickle('III-A_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('III-A_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('III-A_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("III-A_Feats_",Feats)
+np.save("III-A_FeatsMulti",FeatsMulti)
+
+# %% III - B
+Nmodels = 2
+xvar = 'B' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    #PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    PopsModel[si].Bs[0,:] = np.linspace(45., 30., PopsModel[si].nbSamples)
+    #PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    #PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+#    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+#    plt.figure()
+#    plt.plot(tvec,simulatedLFP[0,:,:].T)
+    
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+             
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)          
+            
+plt.figure()
+plt.plot(tvec,simulatedLFP[0,:,:].T)
+                    
+MeasMI_df.to_pickle('III-B_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('III-B_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('III-B_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("III-B_Feats_",Feats)
+np.save("III-B_FeatsMulti",FeatsMulti)
+
+#%% III - K
+Nmodels = 2
+xvar = 'K' #which parameter is varied (for plotting)
+Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                 Nsets = Nmodels, #number of coupled model/population subsets 
+                 A = 4.,# EXC
+                 B = 40,#SDI
+                 G = 20,#FSI
+                 K = 0.3)#coupling factor
+
+PopsModel = [None]*len(stimAmp)
+Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
+
+for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = Fs, #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=2000.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse 
+    
+    #shift parameters towards ictal activity of a specific population set
+    #PopsModel[si].As[0,:] = np.linspace(2.5,4.7, PopsModel[si].nbSamples)
+    #PopsModel[si].Bs[0,:] = np.linspace(45., 30., PopsModel[si].nbSamples)
+    PopsModel[si].Ks[:,:] = np.linspace(0., 0.5, PopsModel[si].nbSamples)
+    
+    #PopsModel[si].stimInput[0][:,:] = 0#No stimulus ipsilateral to ictal onset
+    
+    #stimuli timestamps       
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))    
+    tic = time.time()
+    simulatedLFP = Parallel(n_jobs=12,max_nbytes=None)(
+            delayed(PopsModel[si].simulateLFP)(highpass = 1)
+            for mi in range(Nsims)) 
+    print (time.time()-tic)
+    simulatedLFP = np.array(simulatedLFP)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs)
+
+    if Nmodels >1: #if coupled model subsets
+        meanLFP = np.zeros([Nsims,PopsModel[si].nbSamples])#mean LFP of all channels/models
+        meanLFP = np.mean(simulatedLFP,axis = 1).T 
+    else: 
+        meanLFP = np.zeros([1,Nsims])
+    #Feats[si], FeatsMulti[si] = featFromSim(simulatedLFP, Nmodels, Nsims,promedia,stimTS,PopsModel[si].Fs) # extract features - no parfor
+
+    #extract features
+    tic = time.time()
+    FeatTuple = Parallel(n_jobs=10,max_nbytes=None)(
+            delayed(SimFeats)(simulatedLFP[mi,:,:],Nmodels,promedia,stimTS,PopsModel[si].Fs,meanLFP[:,mi]) for mi in range(Nsims))
+    #first element - univariate features. Second element = multivariate/synchrony features
+    print (time.time()-tic)
+    
+    #organize univariate features [stimsAmp][ModelSubsets][Features][stim/time,realization]
+    Feats[si] = [None]*len(FeatTuple[0][0])
+    for chi in range(len(FeatTuple[0][0])):
+        featemp = FeatTuple[0][0][0]
+        Feats[si][chi] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'IctalOnset':
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)])
+            else:       
+                Feats[si][chi][fkey] = np.array([FeatTuple[mi][0][chi][fkey] for mi in range(Nsims)]).T
+    #organize synchrony features 
+    #[realization][] to  #[stimsAmp][Features][stim/time,realization,Channel combination] 
+    if Nmodels >1:
+        featemp = FeatTuple[0][1]
+        FeatsMulti[si] = dict.fromkeys(featemp.keys(), None)
+        for fkey in featemp.keys():
+            if fkey == 'SynchPairs':
+                FeatsMulti[si][fkey] = np.array([FeatTuple[0][1][fkey]])
+            else:    
+                FeatsMulti[si][fkey] = np.ndarray(shape = [len(stimTS),Nsims,len(FeatTuple[0][1]["SynchPairs"])])
+                for mi in range(Nsims):
+                    FeatsMulti[si][fkey][:,mi,:] = FeatTuple[mi][1][fkey]
+                    
+plt.figure()
+plt.plot(tvec,simulatedLFP[0,:,:].T)
+                    
+plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag","normEnergy"]#which features
+plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
+xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
+# correlation measures
+
+MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
+                                                     plotFeatures,
+                                                     plotFeaturesSynch,
+                                                     chSet = 0,#select which population/model set
+                                                     Nmodels = Nmodels, 
+                                                     FeatsMulti = FeatsMulti)
+if Nmodels >1:
+    MeasMI_df2, MeasSpCorr_df2, MeasCorr_df2 = CorrMeasures(xplot,Feats,
+                                                         plotFeatures,
+                                                         plotFeaturesSynch,
+                                                         chSet = 1,#select which population/model set
+                                                         Nmodels = Nmodels, 
+                                                         FeatsMulti = FeatsMulti)
+    
+    MeasMI_df = pd.concat([MeasMI_df,MeasMI_df2], ignore_index=True)
+    MeasSpCorr_df = pd.concat([MeasSpCorr_df, MeasSpCorr_df2], ignore_index=True)  
+    MeasCorr_df = pd.concat([MeasCorr_df, MeasCorr_df2], ignore_index=True)                      
+                    
+MeasMI_df.to_pickle('III-K_MI.pkl')    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('III-K_SpCorr.pkl')    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('III-K_Corr.pkl')    #to save the dataframe, df to 123.pkl
+
+np.save("III-K_Feats",Feats)
+np.save("III-K_FeatsMulti",FeatsMulti)
