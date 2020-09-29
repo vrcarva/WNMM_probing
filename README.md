@@ -1,10 +1,10 @@
 # Active probing to highlight approaching transitions to ictal states in coupled neural mass models
 
-This repository contains a Python translation of Wendling's CA1 neural mass model [[1]](https://doi.org/10.1046/j.1460-9568.2002.01985.x) and it's modified version to generate figures in the Manuscript "Active probing to highlight approaching transitions to ictal states in coupled neural mass models". This manuscript evaluates the use of probing stimuli for seizure forecasting in this neuronal computational model. This is done by simulating the model's simulated neuronal activity (or simulated local field potential - LFP) while it's dynamics gradually shift from normal neuronal activity towards an ictal (or seizure) state. In general, this gradual change of underlying system parameters is not observable just by looking at features extracted from the model's output, but is detectable when perturbations are applied to it. 
+This repository contains a Python translation of [Wendling's CA1 neural mass model](https://doi.org/10.1046/j.1460-9568.2002.01985.x) and it's modified version to generate figures in the Manuscript "Active probing to highlight approaching transitions to ictal states in coupled neural mass models". This manuscript evaluates the use of probing stimuli for seizure forecasting in this neuronal computational model. This is done by simulating the model's simulated neuronal activity (or simulated local field potential - LFP) while it's dynamics gradually shift from normal neuronal activity towards an ictal (or seizure) state. In general, this gradual change of underlying system parameters is not observable just by looking at features extracted from the model's output, but is detectable when perturbations are applied to it. 
 
 The original model consists which consists of four coupled population subsets and based on the global cellular organization of the hippocampus; excitatory main cells (pyramidal cells), excitatory interneurons, inhibitory neurons with slow kinetics (O-LM neurons, with IPSCs mediated by dendritic synapses) and inhibitory neurons with fast kinetics (soma-projecting Basket Cells). The model input is white noise applied to the main excitatory cells. One instance of this model is referred to as a population set. 
 
-In the modified model, two population sets are coupled through main excitatory cells with a coupling gain K. Periodic stimuli are summed to the original model's white noite input to main excitatory cells. Thoughout a simulation, t
+In the modified model, two population sets are coupled through main excitatory cells with a coupling gain K. Periodic stimuli are summed to the white noise input to main excitatory cells. 
 
 Following the manuscript's methods:
 1. Activity of two population sets is simulated, while a specific parameter (excitability, slow inhibition or coupling gain) is linearly changed from the beginning up to the end of the simulation. Probing stimuli are applied to one or both population sets every 2 seconds. Different simulations are done, increasing stimulation amplitude.
@@ -13,9 +13,11 @@ Following the manuscript's methods:
 4. correlate feature series with parameter varied to induce seizure state (or simulation time)
 
 
-**SimFeatures.py** does steps 1 and 2 - simulate several model configurations (I-A,I-B,I-K, II-A,II-B,II-K) and save extracted features from each one to .npy files. Correlation measures between features and shifted parameters are also calculated and saved to .pkl files. Block 3 of the script simulates an instance of the model in configuration I-A with and without probing stimuli to generate Figure 2 from the paper.
+**SimFeatures.py** steps 1 and 2 - simulate several model settings (I-A,I-B,I-K, II-A,II-B,II-K) and save extracted features from each one to .npy files. Correlation measures between features and shifted parameters are also calculated and saved to .pkl files. Block 3 of the script simulates an instance of the model in with and without probing stimuli to generate Figure 2 from the paper.
 
-**Make_figs.py** loads the extracted features and generates the figures showed in the manuscript.
+**Make_figs.py** loads .npy files with the extracted features and generates the figures in the manuscript.  
+
+**simWNMMoriginal.py** to simulate the original Wendling model
 
 
 
