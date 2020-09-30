@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Jul 22 17:47:45 2019
 
 Simulates coupled Wendling neural mass models with and without periodic stimuli to main EXC cells,
-changing parameters (EXC/A, SDI/B or coupling gain/K) to bring population activity towards seizure. 
+changing parameters (EXC/A, SDI/B or coupling gain/K) to bring population activity towards the ictal state. 
 Features are extracted throughout each simulation - trends in the resulting feature seried could
 result in seizure predictors. 
 
@@ -14,8 +13,8 @@ Block 2 calculates correlation measures between the resulting feature series (va
 and the shifted parameter. If correlation is high, feature increase/decrease may signal that the 
 model is approaching a seizure.  Output variables are saved - features as .npy and correlation measures as .pkl
 
-Block 3 simulates an instance of the model in configuration I-A with and without probing stimuli, 
-in order to generate Figure 2 from the paper.
+Block 3 simulates an instance of the model to generate Figure 2 from the paper - with and withou stimulation
+of neuronal population 1, while linearly increasing A1 to elicit ictal activity in the end.
 
 @author: Vinícius Rezende Carvalho
 vrcarva@ufmg.br
@@ -38,14 +37,14 @@ from itertools import groupby
 #from mpl_toolkits.axes_grid1 import make_axes_locatable
 # Model simulation
 class CA1simulation():
-    """ Model simulation class.
+    """ Model simulation.
     Pops: CA1popSet neuronal population instance
     Fs: Sampling frequency (Hz). Default = 512 Hz
     finalTime: Simulation time (s). Default = 100s
     stimPeriod: Stimulation period (s). Default = 2
     stimDuration: Stimulus duration (s). Default 0.01
     stimAmp: Stimulation amplitude. Default = 4
-    stimPos: Stimulation input position ("DG" for input at main EXC cells or "all" to apply at membrane potential of all neural masses)
+    stimPos: Stimulation input position ("DG" for input at main EXC cells or "all" to apply at membrane potential of all sub-populations)
     biphasic: 1/true for biphasic stimuli, 0/false for monophasic
     """ 
     def __init__(self,Pops,Fs = 512, finalTime=100.,stimPeriod = 2,stimDuration = 0.01,stimAmp = 4,stimPos = "DG",biphasic = 0 ):
@@ -72,7 +71,7 @@ class CA1simulation():
         #[one for each model set] [time samples, 0 for intra-hip stim/ 1 for DG stim]
         uinput = [np.zeros([2,self.nbSamples]) for ui in range(Pops.Nsets)]
         
-        if stimPos == "DG":#stimulates model input
+        if stimPos == "DG":#stimulates model input - APs to main excitatory cells
             uIdx = 1
         else: #stimulates all cells
             uIdx = 0
@@ -139,10 +138,10 @@ class CA1simulation():
     
 class CA1popSet():
     """Wendling neural mass model population sets
-    Nsets: defines the number of populations. Default = 2
+    Nsets: defines the number of populations or model subsets. Default = 2
     coupling: defines how these are interconected 
-        "inter" for inter-hemisphere coupling, through main exc cells
-        "intra" for intra-hippocampal coupling through basket cells
+        "inter" for coupling through main exc cells (inter-hemisphere)
+        "intra" for coupling through basket cells (intra-hippocampal)
     A: main cells excitatory gain
     B: Slow inhibitory gain
     G: Fast inhibitory gain
@@ -169,12 +168,12 @@ def wendlingModel_2(y, P, h = 1./512, u = np.zeros(1), couplIntra = 0, couplInte
     y: last state
     P: model parameters
     h: step (1/Fs)
-    u: stimulation input - 2 elements u[0] voltage deflection to all cells. u[1] sums the stimulus to the model input p(t)
+    u: stimulation input - 2 elements u[0] voltage deflection to all cells. u[1] sums the stimulus to the model input p(t) to main excitatory cells
     couplIntra: coupling between basket cells (intra-hipp coupling)
     couplInter: coupling between pyramidal cells (inter-hemisphere coupling)
     """
-    #euler-maruyama 
-    noise = np.random.normal(0, P["sigmaP"])# np.sqrt(dt) para compensar diferentes steps de integração
+   
+    noise = np.random.normal(0, P["sigmaP"])#using Euler-maruyama, so we multiply this by sqrt(h) below (see Hebbink,2014)
     yNew = np.zeros(10)
     yNew[0] = y[0] + y[5] * h
     yNew[5] = y[5] + (P["A"] * P["a"] * sigm(P["K"]*couplInter+u[0]+y[1]-y[2]-y[3],P) - 2. * P["a"] * y[5] - P["a"]*P["a"] * y[0]) * h
@@ -193,9 +192,15 @@ def sigm(v,P):#sigmoid
     return 2.*P["e0"]/(1.+np.exp(P["r"]*(P["v0"]-v))) 
 
 def fun_extractERPfeatsUni(erp,preERP,Fs):
-    #Extracts univariate features from epoch
-    #preERP is the baseline signal
-    #Fs is sampling frequency, in Hz
+    """ fun_extractERPfeatsUni(erp,preERP,Fs)
+    Extracts univariate features from epoch
+    Inputs:
+        erp is the epoch (single channel) or segment to extract features from
+        preERP is the baseline signal
+        Fs is sampling frequency, in Hz
+    Output:
+        featsOut with fields: "normEnergy","Energy","Var","Skew","Kurt","Hmob","Kcomp","LLen","LLenNorm","SpectCent" and "lag1AC"
+    """
 
     featsOut = dict()
     #FEATURE EXTRACTION
@@ -229,11 +234,12 @@ def fun_extractERPfeatsUni(erp,preERP,Fs):
     return featsOut
 
 def fun_extractERPfeatsMultivar(erpSynch,erpSynchFilt,Fs):
-    #extract multivariate features
-    #fun_extractERPfeatsMultivar(erpSynch,erpSynchFilt,Fs):
-    #erpSynch is a lxN matrix --> L channels with N samples each, from which synchrony measures are taken (PLV and correlation)
+    """fun_extractERPfeatsMultivar(erpSynch,erpSynchFilt,Fs)
+    extract multivariate features from L channels
+    #erpSynch is a LxN matrix --> L channels with N samples each, from which synchrony measures are taken (PLV and correlation)
     #detrend and normalize erpSynch (fucks up PLV values in some cases if it's not detrended)
     #erpSynchFilt is the filtered version of erpSynch, for calculating the PLV
+    """
     from itertools import combinations
     from sklearn.feature_selection import mutual_info_regression
     erpSynch = (erpSynch.T - np.mean(erpSynch,axis = 1)).T
@@ -266,7 +272,6 @@ def fun_extractERPfeatsMultivar(erpSynch,erpSynchFilt,Fs):
         Wxy, Cxy = signal.coherence(erpSynch[ki[0],:], erpSynch[ki[1],:], Fs, nperseg = 128)
         featsOut["Coh"][iind] = np.mean(Cxy[0:11])
         iind+=1
-    
     
     return featsOut
 
@@ -325,15 +330,11 @@ def SimFeats(simLFP,Nmodels,promedia,stimTS,Fs,simLFPmean = 0):
     if promedia == "erps": #
         allPEARPS_2 = np.zeros([len(stimTS),int((tprePEARP)*Fs)+int((tposPEARP)*Fs)])#  for mean LFP (only for Nmodels >2 and promedia == "erps")
         allPEARPS_2_filt = np.ndarray(shape=(len(stimTS),int((tprePEARP)*Fs)+int((tposPEARP)*Fs),Nmodels))#(Stims,timesamples,channel) same, but lowpass filtered 
-    tpearp = np.linspace(0,allPEARPS.shape[1]/Fs,allPEARPS.shape[1])
-
-    #lowpass filtering
-
+    #tpearp = np.linspace(0,allPEARPS.shape[1]/Fs,allPEARPS.shape[1])
 
     for chi in range(Nmodels):
         simulatedLFPFilt[chi,:] = signal.filtfilt(bLP, aLP, simLFP[chi,:])
         #seizure onset time - find when discharges begin to repeat with intervals <1.5s
-        #TODO how to deal with higher stim. frequencies?
         indsRemove = []#remove peaks near stimuli indexes
         indsRemove = np.append(indsRemove, [np.arange(stemp,stemp+int(0.2*Fs)) for stemp in stimTS])#exclude peaks due to stimulation?
         pk = signal.find_peaks(simLFP[chi,:],height=5)
@@ -449,32 +450,31 @@ def CorrMeasures(xplot,Feats,plotFeatures,plotFeaturesSynch,chSet = 0,Nmodels = 
     MeasCorr_df = pd.concat([ii for ii in MeasCorr], ignore_index=True) 
     
     return MeasMI_df, MeasSpCorr_df, MeasCorr_df
-        
+      
 
-#%% 
+#%% create and simulate models
 
 #sim parameters (default otherwise)
-
-stimAmp = np.linspace(0,200,11) #stimulus amplitudes
+stimAmp = np.linspace(0,200,11) #stimulus amplitudes - One value for each simulation
 #stimAmp = np.array([0])
 Nmodels = 2 #number of population subsets
 
 #Feature parameters
-tprePEARP = 0.4 # pre-stimulus period
-tposPEARP = 0.4 # post-stimulus period for feature extraction
-#promedia = "erps" #smoothing through "features" or "erps" ?
-promedia = "features" #smoothing features or ERPs: "features" or "erps" ?
+tprePEARP = 0.4 # pre-stimulus period (baseline for feature extraction)
+tposPEARP = 0.4 # post-stimulus period for feature extraction?
+promedia = "features" #smoothing features or ERPs: "features" or "erps" 
 avrgWinSize = 20 #moving average window size
 
-Nsims = 2 #number of realizations/simulations
-xvar = 'A' #which parameter is varied (for plotting)
+Nsims = 10 #number of realizations/simulations for each model setting
+xvar = 'A' #which parameter is varied (for plotting) ('A','B' or 'K')
 configProb = "I" #'I' to stimulate population 2 and "II" to stimulate both population sets
 
-Fs = 512.
+Fs = 512.#sampling rate
+#create model
 Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
                  Nsets = Nmodels, #number of coupled model/population subsets 
                  A = 4.,# EXC
-                 B = 40,#SDKI
+                 B = 40,#SDI
                  G = 20,#FSI
                  K = 0.3)#coupling factor
 
@@ -559,7 +559,6 @@ plotFeatures = ["Var","Skew","Kurt","lag1AC","Hcomp","Hmob","ValeAmp","ValeLag",
 plotFeaturesSynch = ["MI","Corr","PLV" ]#which synchrony features
 xplot = eval("PopsModel[si].%ss[%d,:]"%(xvar,0))
 # correlation measures
-
 MeasMI_df, MeasSpCorr_df, MeasCorr_df = CorrMeasures(xplot,Feats,
                                                      plotFeatures,
                                                      plotFeaturesSynch,
@@ -581,18 +580,16 @@ if Nmodels >1:
 #Features x realizations x different simPars x measures
 
 #% save features and measures  
+MeasMI_df.to_pickle('./SimFeatures/%s-%s_MI.pkl'%(configProb,xvar))    #to save the dataframe, df to 123.pkl
+MeasSpCorr_df.to_pickle('./SimFeatures/%s-%s_SpCorr.pkl'%(configProb,xvar))    #to save the dataframe, df to 123.pkl
+MeasCorr_df.to_pickle('./SimFeatures/%s-%s_Corr.pkl'%(configProb,xvar))    #to save the dataframe, df to 123.pkl
 
-MeasMI_df.to_pickle('%s-%s_MI.pkl'%(configProb,xvar))    #to save the dataframe, df to 123.pkl
-MeasSpCorr_df.to_pickle('%s-%s_SpCorr.pkl'%(configProb,xvar))    #to save the dataframe, df to 123.pkl
-MeasCorr_df.to_pickle('%s-%s_Corr.pkl'%(configProb,xvar))    #to save the dataframe, df to 123.pkl
-
-np.save("%s-%s_Feats"%(configProb,xvar),Feats)
-np.save("%s-%s_FeatsMulti"%(configProb,xvar),FeatsMulti)
+np.save("./SimFeatures/%s-%s_Feats"%(configProb,xvar),Feats)
+np.save("./SimFeatures/%s-%s_FeatsMulti"%(configProb,xvar),FeatsMulti)
     
-
     
 #%% Figure 2 - simulate LFPs with and without active probing, from normal to ictal activity
-    
+  
 stimAmp = [0,120]# Simulate with and without probing
 Nmodels = 2
 #
@@ -612,55 +609,45 @@ for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
                                  stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
                                  biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse  
     PopsModel[si].As[0,:] = np.linspace(2.5,5.3, PopsModel[si].nbSamples)
-    PopsModel[si].stimInput[1][:,:] = 0#No stimulus ipsilateral to ictal onset
+    #PopsModel[si].stimInput[1][:,:] = 0#No stimulus contralateral to ictal onset
     simulatedLFP[si] = PopsModel[si].simulateLFP(highpass = 1)
     tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs) 
-    
-#% plot figure
-    
-plt.figure()
-for sb in range(2):
-    plt.subplot(2,1,sb+1)
-    plt.plot(tvec,simulatedLFP[sb][0,:],'k')
-    plt.xlim((129,139))
-    plt.ylim((-0.68,1.75))
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
-    plt.gca().spines['bottom'].set_visible(False)
-    plt.gca().spines['left'].set_visible(False)
-    plt.gca().get_xaxis().set_ticks([])
-    plt.gca().get_yaxis().set_ticks([])
-plt.plot([130,131],[-0.6,-0.6],'k',LineWidth = 3)
-plt.text(130.3,-0.82,"1 sec", fontsize = 12)
 
-plt.plot([129.1,129.1],[0.5,1.5],'k',LineWidth = 3)
-plt.text(128.6,0.9,"1 AU", fontsize = 12)
+#%
+xLims = np.array([[1331,1351],[1505,1525],[1741,1721]])
 
 # % plot Simulation epochs
-
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['ps.fonttype'] = 42
 plt.rc('font',**{'family':'serif','serif':['Arial']})
 plt.rcParams.update({'font.size': 8})
+popSet = 0#which population - 0 or 1
+if popSet == 0:
+    yLims = np.array([[-19,15],[-1.5,4]])
+    yBar = np.array([[5.5,10.5],[1.7,2.7]])
+else:
+    yLims = np.array([[-19,15],[-1.5,4]])
+    yBar = np.array([[5.5,10.5],[1.7,2.7]])    
+    
 
 for sb in range(2):
     if sb == 0:# control (no probing) shows transition + 2 subplots - before and during seizure
         grid = plt.GridSpec(2, 2)
     else:# probing shows transition + 3 subplots - way before seizure, during increased responses and during seizure
         grid = plt.GridSpec(2, 3)
-    plt.figure(figsize=(7.4,2.66))
+    plt.figure(figsize=(3.72,3))
     ax1 = plt.subplot(grid[0,0:])
-    ax1.plot(tvec,simulatedLFP[sb][0,:],'k',LineWidth=0.8)
-    plt.xlim((1250,1730))
-    plt.ylim((-19,17))
-    plt.plot([1280,1330],[8,8],'k',LineWidth = 2) #x scale bar
-    plt.plot([1280,1280],[5.5,10.5],'k',LineWidth = 2)
-    plt.text(1292,9.25,'50 sec',fontsize = 8)
-    plt.text(1259,7,'5 a.u.',fontsize = 8)
+    ax1.plot(tvec,simulatedLFP[sb][popSet,:],'k',LineWidth=0.8)
+    plt.xlim((1290,1750))
+    plt.ylim(yLims[0,:])
+    plt.plot([xLims[0,0],xLims[0,0]+50],[np.mean(yBar[0,:]),np.mean(yBar[0,:])],'k',LineWidth = 2) #x scale bar
+    plt.plot([xLims[0,0],xLims[0,0]],yBar[0,:],'k',LineWidth = 2)
+    plt.text(xLims[0,0]+12,np.mean(yBar[0,:])+1.5,'50 sec',fontsize = 8)
+    plt.text(xLims[0,0]-30,np.mean(yBar[0,:])-1,'5 a.u.',fontsize = 8)
     if sb > 0:
-        plt.plot([1281,1291],[-18.8,-18.8],'r',LineWidth=1.5)
-    plt.plot([1555,1572],[-18.8,-18.8],'r',LineWidth=1.5)
-    plt.plot([1660,1712],[-18.8,-18.8],'r',LineWidth=1.5)
+        plt.plot(xLims[0,:],[yLims[0,0]+0.2,yLims[0,0]+0.2],'r',LineWidth=1.5)
+    plt.plot(xLims[1,:],[yLims[0,0]+0.2,yLims[0,0]+0.2],'r',LineWidth=1.5)
+    plt.plot(xLims[2,:],[yLims[0,0]+0.2,yLims[0,0]+0.2],'r',LineWidth=1.5)
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
     plt.gca().spines['bottom'].set_visible(False)
@@ -669,7 +656,7 @@ for sb in range(2):
     plt.gca().get_yaxis().set_ticks([])
     
     ax2 = plt.subplot(grid[1,0])
-    ax2.plot(tvec,simulatedLFP[sb][0,:],'k',LineWidth=1)
+    ax2.plot(tvec,simulatedLFP[sb][popSet,:],'k',LineWidth=1)
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
     plt.gca().spines['bottom'].set_visible(False)
@@ -677,44 +664,146 @@ for sb in range(2):
     plt.gca().get_yaxis().set_ticks([])
     plt.gca().tick_params(labelbottom=False)  
     if sb == 0:
-        plt.xlim((1555,1573)) 
-        plt.gca().locator_params(axis='x', nbins=9)   
-        plt.plot([1557.45,1557.45],[1.7,2.7],'k',LineWidth = 2)
-        plt.text(1555.75,2,'1 a.u.',fontsize = 8)
+        plt.xlim(xLims[1,:]) 
+        #plt.gca().locator_params(axis='x', nbins=9)   
+        plt.plot([xLims[1,0]+2.45,xLims[1,0]+2.45],yBar[1,:],'k',LineWidth = 2)
+        plt.plot([xLims[1,0]+2.45,xLims[1,0]+7.45],[np.mean(yBar[1,:]),np.mean(yBar[1,:])],'k',LineWidth = 2)
+        plt.text(xLims[1,0]+0.75,np.mean(yBar[1,:]),'1 a.u.',fontsize = 8)
+        plt.text(xLims[1,0]+2.75,np.mean(yBar[1,:])+0.2,'5 sec',fontsize = 8)
+        plt.gca().get_xaxis().set_ticks([])
     else:
-        plt.xlim((1281,1293))
-        plt.plot([1283.5,1283.5],[2.6,3.6],'k',LineWidth = 2)
-        plt.text(1281.75,2.9,'1 a.u.',fontsize = 8)
-        plt.gca().locator_params(axis='x', nbins=6)   
-    plt.ylim((-1.5,4))
+        plt.xlim(xLims[0,:])
+        plt.plot([xLims[0,0]+3.5,xLims[0,0]+3.5],yBar[1,:],'k',LineWidth = 2)
+        plt.plot([xLims[0,0]+3.5,xLims[0,0]+8.45],[np.mean(yBar[1,:]),np.mean(yBar[1,:])],'k',LineWidth = 2)
+        plt.text(xLims[0,0]+0.75,2.9,'1 a.u.',fontsize = 8)
+        plt.gca().locator_params(axis='x', nbins=10)   
+    plt.ylim(yLims[1,:])
         
     ax2 = plt.subplot(grid[1,1])
-    ax2.plot(tvec,simulatedLFP[sb][0,:],'k',LineWidth=1)
+    ax2.plot(tvec,simulatedLFP[sb][popSet,:],'k',LineWidth=1)
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
     plt.gca().spines['bottom'].set_visible(False)
     plt.gca().spines['left'].set_visible(False)
     plt.gca().get_yaxis().set_ticks([])
     plt.gca().tick_params(labelbottom=False)  
-    if sb > 0:
-        plt.xlim((1555,1573)) 
-        plt.ylim((-19,17))
-        plt.gca().locator_params(axis='x', nbins=9)   
+    if sb == 1:
+        plt.xlim(xLims[1,:]) 
+        plt.ylim(yLims[0,:])
+        plt.gca().locator_params(axis='x', nbins=10)   
+        plt.plot([xLims[1,1]-8,xLims[1,1]-8],yBar[0,:],'k',LineWidth = 2)
+        #plt.plot([xLims[1,1]-8,xLims[1,1]-3],[4.5,4.5],'k',LineWidth = 2)
+    else:
+        plt.gca().get_xaxis().set_ticks([])
     
     if sb == 1:
         ax3 = plt.subplot(grid[1,2])
-        ax3.plot(tvec,simulatedLFP[sb][0,:],'k',LineWidth=1)
+        ax3.plot(tvec,simulatedLFP[sb][popSet,:],'k',LineWidth=1)
         plt.gca().spines['top'].set_visible(False)
         plt.gca().spines['right'].set_visible(False)
         plt.gca().spines['bottom'].set_visible(False)
         plt.gca().spines['left'].set_visible(False)
         plt.gca().get_yaxis().set_ticks([])
         plt.gca().tick_params(labelbottom=False) 
-        
-    plt.gca().locator_params(axis='x', nbins=50)    
-    plt.xlim((1660,1712))  
-    plt.ylim((-19,17))  
+        plt.gca().locator_params(axis='x', nbins=10) 
+    else:
+        plt.gca().get_xaxis().set_ticks([])
+
+    plt.plot([xLims[2,1]-8,xLims[2,1]-8],yBar[0,:],'k',LineWidth = 2)
+    plt.xlim(xLims[2,:])  
+    plt.ylim(yLims[0,:])  
     plt.tight_layout()
     
+#%% Fig 2.c - each subplot with mean response for specific parameter
+
+tprePEARP = 0.1 # pre-stimulus period
+tposPEARP = 0.4 # post-stimulus period for feature extraction
+
+stimAmp = 120 # Simulate with and without probing
+Nmodels = 2
+AAs = [2.5 , 3, 3.5, 4.0, 4.5, 5.0 ]
+#
+PopsModel = [None]*len(AAs)
+Feats = [None]*len(AAs) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
+FeatsMulti = [None]*len(AAs) #[stimsAmp][Features][stim/time,realization,Channel combination]
+simulatedLFP = [None]*len(AAs)
+
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['ps.fonttype'] = 42
+plt.rc('font',**{'family':'serif','serif':['Arial']})
+plt.rcParams.update({'font.size': 8})
+
+
+figWaves = [plt.figure(figsize = [3.7, 1.5]),plt.figure(figsize = [3.7, 1.5])]
+for si,Aiter in enumerate(AAs):
+    Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
+                     Nsets = Nmodels, A = Aiter,B = 40, G = 20,K = 0.3)
+
+    PopsModel[si] = CA1simulation(Pops, #populations to simulate
+                                 Fs = 512., #user-defined sampling frequency (typical: 512 Hz)
+                                 finalTime=50.,#total simulation time, in seconds
+                                 stimAmp = stimTemp,#stimulus amplitude
+                                 stimPeriod = 2.,#stimulus period
+                                 stimDuration = 0.01,#stimulus duration (seconds)
+                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
+                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse  
+    #PopsModel[si].As[0,:] = np.linspace(2.5,5.3, PopsModel[si].nbSamples)
+    #PopsModel[si].stimInput[1][:,:] = 0#No stimulus ipsilateral to ictal onset
+    simulatedLFP[si] = PopsModel[si].simulateLFP(highpass = 0)
+    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs) 
     
-#%%
+for si,Aiter in enumerate(AAs):  
+    stimTS = np.arange(int(PopsModel[si].Fs*PopsModel[si].stimPeriod),PopsModel[si].nbSamples,int(PopsModel[si].Fs*PopsModel[si].stimPeriod))
+    allPEARPS = np.ndarray(shape=(len(stimTS),int((tprePEARP)*PopsModel[si].Fs)+int((tposPEARP)*PopsModel[si].Fs),Nmodels))#(Stims,timesamples,channel)
+    for s_ts in range(len(stimTS)):
+        indsERP = np.arange(stimTS[s_ts],stimTS[s_ts]+int(tposPEARP*PopsModel[si].Fs))#ERP indexes (only for "feature" averaging)
+        #indsERP2 = range(max(0,si-avrgWinSize+1),si+1) #indexes - which ERPs to average (relative to allPEARPS) - mean ERP of last "avrgWinSize" stimuli
+        for chi in range(Nmodels):#for each channel/model
+            allPEARPS[s_ts,:,chi] = simulatedLFP[si][chi,stimTS[s_ts]-int(tprePEARP*PopsModel[si].Fs):stimTS[s_ts]+int(tposPEARP*PopsModel[si].Fs)]
+
+    #
+    tpearp = np.linspace(0,allPEARPS.shape[1]/PopsModel[si].Fs,allPEARPS.shape[1])
+    tpearp = tpearp-tprePEARP
+
+    for ch_i in [0,1]:
+        plt.figure(figWaves[ch_i].number)
+        plt.subplot(1,len(AAs),si+1)
+        #ax = plt.axes()
+        #ax.set_prop_cycle('color',[plt.cm.Blues(i) for i in np.linspace(0, 1, allPEARPS.shape[0])])
+        plt.plot(tpearp,allPEARPS[:,:,ch_i].T,alpha = .2, color = 'k', linewidth = .5)
+        plt.plot(tpearp,np.mean(allPEARPS[:,:,ch_i],axis = 0),color = 'k',linewidth = 2.5)
+        plt.fill_between(tpearp, np.mean(allPEARPS[:,:,ch_i],axis = 0)-np.std(allPEARPS[:,:,ch_i],axis = 0),
+                                 np.mean(allPEARPS[:,:,ch_i],axis = 0)+np.std(allPEARPS[:,:,ch_i],axis = 0), 
+                                 color='k', alpha=.1)
+        plt.axis('off')
+        plt.ylim([-4,4])
+        #plt.title('A$_1$ = %.1f'%Aiter)
+plt.figure(figWaves[0].number)
+plt.tight_layout()    
+plt.figure(figWaves[1].number)
+plt.tight_layout()    
+
+
+#%%    
+    
+"""
+if 0:
+    %% Reduce feature file size - delete features not used in figure
+    for arquivo in ["I-A","I-B","I-K","II-A","II-B","II-K"]: #which configuration (II-A,II-B,II-K,III-A,III-B,III-K)
+        Feats = np.load("%s_Feats.npy"%arquivo,allow_pickle = True)
+        FeatsMulti = np.load("%s_FeatsMulti.npy"%arquivo,allow_pickle = True)
+        
+        for ii in range(Feats.shape[0]):
+            for jj in range(Feats.shape[1]):
+                for kk in ["Ictal","Energy","PkAmp","PkLag","ValeAmp","ValeLag","Hmob","Hcomp"]:
+                    del Feats[ii,jj][kk]
+                    
+        for ii in range(FeatsMulti.shape[0]):
+            for kk in ["Coh","Corr","PLVphase","PLV"]:
+                del FeatsMulti[ii][kk]
+            
+        Feats = Feats[:,:2]#delete mean LFP features
+        np.save("%s_Feats.npy"%arquivo,Feats)
+        np.save("%s_Feats.npy"%arquivo,FeatsMulti)
+    
+"""

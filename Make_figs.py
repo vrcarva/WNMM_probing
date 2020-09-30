@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Dec  2 21:10:28 2019
+Loads .pkl and .npy files from ./SimFeatures/ and plots figures from the manuscript.
 
-@author: John
+@author: Vinícius Rezende Carvalho
+vrcarva@ufmg.br
 """
 
 import numpy as np
@@ -14,7 +15,6 @@ from scipy.ndimage.filters import uniform_filter1d
 #from mpl_toolkits.axes_grid1 import make_axes_locatable
 #from sklearn.feature_selection import mutual_info_regression
 #import seaborn as sns
-
 
     
 def plotUniFigs(pFeats,xlabels,xvar,Fs = 512, zscore = 0,sb_row = 3, sb_col = 3, plotColor = [0,0,0],sb_offset = 0):
@@ -69,51 +69,9 @@ def multiCompare(dfMeasure, selectedFeats):
     return ps_,h_rej                            
  
 
-#%% Fig 2 - simulated LFPs
-    
-stimAmp = [0,120]
-Nmodels = 2
-Pops = CA1popSet(coupling = "inter", #"inter" for inter-hemisphere (between PYR cells) or "intra" for intra-hemisphere coupling (between basket cells)
-                 Nsets = Nmodels, A = 4.,B = 40, G = 20,K = 0.3)
-PopsModel = [None]*len(stimAmp)
-Feats = [None]*len(stimAmp) #[stimsAmp][ModelSubsets][Features][stim/time,realization]
-FeatsMulti = [None]*len(stimAmp) #[stimsAmp][Features][stim/time,realization,Channel combination]
-simulatedLFP = [None]*len(stimAmp)
-for si,stimTemp in enumerate(stimAmp):# for each stimulus parameter
-    PopsModel[si] = CA1simulation(Pops, #populations to simulate
-                                 Fs = 512., #user-defined sampling frequency (typical: 512 Hz)
-                                 finalTime=2000.,#total simulation time, in seconds
-                                 stimAmp = stimTemp,#stimulus amplitude
-                                 stimPeriod = 2.,#stimulus period
-                                 stimDuration = 0.01,#stimulus duration (seconds)
-                                 stimPos = "DG",#"DG" (sum stimulus to noise input to main cells - simulates stimulus to the DG) or "all" (sum stimulus to PSPs of all cells)
-                                 biphasic = 0)# #biphasic (1) or monophasic (0) stimulation pulse  
-    PopsModel[si].As[0,:] = np.linspace(2.5,5.3, PopsModel[si].nbSamples)
-    PopsModel[si].stimInput[1][:,:] = 0#No stimulus ipsilateral to ictal onset
-    simulatedLFP[si] = PopsModel[si].simulateLFP(highpass = 1)
-    tvec = np.arange(0,PopsModel[si].finalTime,1/PopsModel[si].Fs) 
-    
-#%
-    
-plt.figure()
-for sb in range(2):
-    plt.subplot(2,1,sb+1)
-    plt.plot(tvec,simulatedLFP[sb][0,:],'k')
-    plt.xlim((129,139))
-    plt.ylim((-0.68,1.75))
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
-    plt.gca().spines['bottom'].set_visible(False)
-    plt.gca().spines['left'].set_visible(False)
-    plt.gca().get_xaxis().set_ticks([])
-    plt.gca().get_yaxis().set_ticks([])
-plt.plot([130,131],[-0.6,-0.6],'k',LineWidth = 3)
-plt.text(130.3,-0.82,"1 sec", fontsize = 12)
 
-plt.plot([129.1,129.1],[0.5,1.5],'k',LineWidth = 3)
-plt.text(128.6,0.9,"1 AU", fontsize = 12)
 
-#%% Plot feature series and correlation measures 
+#%% Plot feature series and correlation measures figures 3 to 8 (change )
 
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['ps.fonttype'] = 42
@@ -126,9 +84,10 @@ Fs = 512
 Nstim = 999 #number of features (or stimuli epochs) in each simulation 
 stimAmp = np.linspace(0,200,11)
 
-arquivo = "III-A" #which configuration (II-A,II-B,II-K,III-A,III-B,III-K)
-Feats = np.load("%s_Feats.npy"%arquivo,allow_pickle = True)
-FeatsMulti = np.load("%s_FeatsMulti.npy"%arquivo,allow_pickle = True)
+modelSet = "II-A" #which configuration (II-A,II-B,II-K,III-A,III-B,III-K)
+Feats = np.load("./SimFeatures/%s_Feats.npy"%modelSet,allow_pickle = True)
+FeatsMulti = np.load("./SimFeatures/%s_FeatsMulti.npy"%modelSet,allow_pickle = True)
+
 
 xvarFeats = {"A":np.linspace(2.5,4.7,Nstim),"B":np.linspace(45,30,Nstim),'K':np.linspace(0,0.5,Nstim)}
 xaxsLabel = {"A": 'EXC (A)',"B": "SDI (B)",'K':'Coupling gain (K)'}
@@ -139,9 +98,9 @@ uiStim = [0,4,8,10] #plot features w/ confidence intervals from which stimulatio
 #cores = [plt.cm.Blues(int(ci)) for ci in np.linspace(110,200,len(uiStim))]
 cores = [plt.cm.Blues(int(ci)) for ci in np.linspace(130,255,len(uiStim))]
 
-xvar = xvarFeats[arquivo[-1]]
+xvar = xvarFeats[modelSet[-1]]
 figFeat = plt.figure(figsize=(6.5,  3.8))
-[plotUniFigs(Feats[ui][0],xlabels = xaxsLabel[arquivo[-1]],xvar = xvar,zscore = 0,sb_row = 3, sb_col = 5, plotColor = ci) for ui,ci in zip(uiStim,cores)]
+[plotUniFigs(Feats[ui][0],xlabels = xaxsLabel[modelSet[-1]],xvar = xvar,zscore = 0,sb_row = 3, sb_col = 5, plotColor = ci) for ui,ci in zip(uiStim,cores)]
 
 plotFeaturesSynch = ["MI"]#which synchrony features
 for ui,ci in zip(uiStim,cores):
@@ -160,7 +119,7 @@ for ui,ci in zip(uiStim,cores):
     plt.gca().locator_params(axis='y', nbins=2)
     #plt.gca().get_xaxis().set_ticks([])
     plt.gca().set_xticks(np.linspace(xvar[0],xvar[-1],3))
-    plt.xlabel(xaxsLabel[arquivo[-1]])    
+    plt.xlabel(xaxsLabel[modelSet[-1]])    
     plt.autoscale(tight=True)
     _, _, ymin, ymax = plt.axis()
 
@@ -168,11 +127,11 @@ for ui,ci in zip(uiStim,cores):
 #plt.text(100, ymin - (0.08)*(ymax-ymin), "250 s", fontsize=8)
 #plt.legend(stimAmp[uiStim].astype(int))
 
-[plotUniFigs(Feats[ui][1],xlabels = xaxsLabel[arquivo[-1]],xvar = xvar,zscore = 0,sb_row = 3, sb_col = 5, plotColor = ci,sb_offset=5) for ui,ci in zip(uiStim,cores)]
+[plotUniFigs(Feats[ui][1],xlabels = xaxsLabel[modelSet[-1]],xvar = xvar,zscore = 0,sb_row = 3, sb_col = 5, plotColor = ci,sb_offset=5) for ui,ci in zip(uiStim,cores)]
 #correlation measurements
-MeasMI_df = pd.read_pickle("%s_MI.pkl"%arquivo)
-MeasSpCorr_df = pd.read_pickle("%s_SpCorr.pkl"%arquivo)
-MeasCorr_df = pd.read_pickle("%s_Corr.pkl"%arquivo)  
+MeasMI_df = pd.read_pickle("./SimFeatures/%s_MI.pkl"%modelSet)
+MeasSpCorr_df = pd.read_pickle("./SimFeatures/%s_SpCorr.pkl"%modelSet)
+MeasCorr_df = pd.read_pickle("./SimFeatures/%s_Corr.pkl"%modelSet)  
 
 plotFeatLabels = ["Var","Skew","Kurt","lag1AC","MI" ]
 plotTitle = ["Variance","Skewness","Kurtosis","Lag-1 AC","MI"]
@@ -214,10 +173,10 @@ for canal in chSet:
 
 plt.tight_layout()
 plt.subplots_adjust(wspace = 0.45)
-plt.savefig("%s_Feats_Meas.pdf"%(arquivo), transparent=True)
-plt.savefig("%s_Feats_Meas.png"%(arquivo), transparent=True)
+plt.savefig("%s_Feats_Meas.pdf"%(modelSet), transparent=True)
+plt.savefig("%s_Feats_Meas.png"%(modelSet), transparent=True)
 
-#%% ICTAL ONSETS
+#%% ICTAL ONSETS - figure 9
 from scipy.stats import shapiro
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['ps.fonttype'] = 42
@@ -227,7 +186,7 @@ Fs = 512
 stimTS = np.arange(512*2,int(512*2000),512*2)    
 stimAmp = np.linspace(0,200,11)
 
-arquivo = ["II-A","III-A","II-B","III-B","II-K","III-K"] #load ictal onsets for each configuration
+modelSets = ["II-A","III-A","II-B","III-B","II-K","III-K"] #load ictal onsets for each configuration
 
 eLineWs = [1, 2]
 eAlphas = [1,0.75]
@@ -235,14 +194,14 @@ eAlphas = [1,0.75]
 chSet = [0,1]
 fig1 = plt.figure(figsize=(4,  4.8))
 
-for spi,iconf in enumerate(arquivo):
+for spi,iconf in enumerate(modelSets):
     plt.subplot(3,2,spi+1)
     if iconf[-1] == "A":
-        FeatsLoad = np.load("%s_Feats_IctalOnset[2_5 5_5].npy"%iconf,allow_pickle = True)
+        FeatsLoad = np.load("./SimFeatures/%s_Feats_IctalOnset[2_5 5_5].npy"%iconf,allow_pickle = True)
     elif iconf[-1] == "B":
-        FeatsLoad = np.load("%s_Feats_IctalOnset[45 20].npy"%iconf,allow_pickle = True)
+        FeatsLoad = np.load("./SimFeatures/%s_Feats_IctalOnset[45 20].npy"%iconf,allow_pickle = True)
     elif iconf[-1] == "K":
-        FeatsLoad = np.load("%s_Feats_IctalOnset[0 1].npy"%iconf,allow_pickle = True)
+        FeatsLoad = np.load("./SimFeatures/%s_Feats_IctalOnset[0 1].npy"%iconf,allow_pickle = True)
 
     for canal in chSet:
         yAll =  np.array([FeatsLoad[ui][canal]["IctalOnset"] for ui in range(len(stimAmp))])/Fs
@@ -286,10 +245,10 @@ for spi,iconf in enumerate(arquivo):
     plt.title(iconf[1:])
 plt.tight_layout()    
 
-plt.savefig("%s_IctalOnsets.pdf"%(arquivo), transparent=True)
-plt.savefig("%s_IctalOnsets.png"%(arquivo), transparent=True)
+plt.savefig("%s_IctalOnsets.pdf"%(modelSets), transparent=True)
+plt.savefig("%s_IctalOnsets.png"%(modelSets), transparent=True)
 
     
     
-    
+
     
