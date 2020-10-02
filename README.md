@@ -21,8 +21,8 @@ Following the manuscript's methods:
 
 
 
-Vinícius Rezende Carvalho
-Núcleo de Neurociências
-Programa de Pós-Graduação em Engenharia Elétrica - UFMG
-vrcarva@ufmg.br
+Vinícius Rezende Carvalho  
+Núcleo de Neurociências  
+Programa de Pós-Graduação em Engenharia Elétrica - Universidade Federal de Minas Gerais (UFMG)  
+vrcarva@ufmg.br  
 vrezendecarvalho@mgh.harvard.edu
