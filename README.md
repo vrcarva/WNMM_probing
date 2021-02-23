@@ -1,6 +1,6 @@
 # Active probing to highlight approaching transitions to ictal states in coupled neural mass models
 
-This repository contains a Python translation of [Wendling's CA1 neural mass model](https://doi.org/10.1046/j.1460-9568.2002.01985.x) and it's modified version to generate figures in the manuscript "[Active probing to highlight approaching transitions to ictal states in coupled neural mass models](https://www.biorxiv.org/content/10.1101/2020.10.06.327692v1)". This manuscript evaluates the use of probing stimuli for seizure forecasting in this neuronal computational model. This is done by simulating the model's simulated neuronal activity (or simulated local field potential - LFP) while it's dynamics gradually shift from normal neuronal activity towards an ictal (or seizure) state. In general, this gradual change of underlying system parameters is not observable just by looking at features extracted from the model's output, but is detectable when perturbations are applied to it. 
+This repository contains a Python translation of [Wendling's CA1 neural mass model](https://doi.org/10.1046/j.1460-9568.2002.01985.x) and it's modified version to generate the figures in the paper "[Active probing to highlight approaching transitions to ictal states in coupled neural mass models](https://doi.org/10.1371/journal.pcbi.1008377)". This manuscript evaluates the use of probing stimuli for seizure forecasting in this neuronal computational model. This is done by simulating the model's simulated neuronal activity (or simulated local field potential - LFP) while it's dynamics gradually shift from normal neuronal activity towards an ictal (or seizure) state. In general, this gradual change of underlying system parameters is not observable just by looking at features extracted from the model's output, but is detectable when perturbations are applied to it. 
 
 The original model consists of four coupled population subsets and is based on the global cellular organization of the hippocampus; excitatory main cells (pyramidal cells), excitatory interneurons, inhibitory neurons with slow kinetics (O-LM neurons, with IPSCs mediated by dendritic synapses) and inhibitory neurons with fast kinetics (soma-projecting Basket Cells). The model input is white noise applied to the main excitatory cells. One instance of this model is referred to as a population set. 
 
@@ -18,6 +18,9 @@ Following the manuscript's methods:
 **Make_figs.py** loads .npy files with the extracted features and generates the figures in the manuscript.  
 
 **simWNMMoriginal.py** to simulate the original Wendling model
+
+
+Carvalho VR, Moraes MFD, Cash SS, Mendes EMAM (2021) Active probing to highlight approaching transitions to ictal states in coupled neural mass models. PLOS Computational Biology 17(1): e1008377. https://doi.org/10.1371/journal.pcbi.1008377  
 
 
 Vinícius Rezende Carvalho  
